@@ -1,0 +1,16 @@
+hosts:
+  - id: h1
+    ip: 10.0.0.1
+  - id: h2
+    ip: 10.0.0.2
+
+switches:
+  - id: s1
+
+links:
+  - endpoints: [h1, s1]
+    delay: 10ms
+    loss: 0.1%
+  - endpoints: [h2, s1]
+    delay: 5ms
+    loss: 0%
