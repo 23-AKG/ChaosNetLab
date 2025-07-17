@@ -1,0 +1,20 @@
+# WAN files or large model weights
+*.wan
+*.pt
+*.ckpt
+
+# OS/system files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.env/
+
+# Logs and outputs
+*.log
+output/
