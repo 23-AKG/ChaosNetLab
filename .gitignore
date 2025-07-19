@@ -18,3 +18,4 @@ venv/
 # Logs and outputs
 *.log
 output/
+logger/logs/

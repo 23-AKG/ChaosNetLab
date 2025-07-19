@@ -29,7 +29,7 @@ def launch(topo):
 
 @cli.command()
 @click.option('--target', required=True, help='Target host or interface (e.g., h1-eth0)')
-@click.option('--type', 'fault_type', required=True, type=click.Choice(['loss', 'delay', 'down'], case_sensitive=False))
+@click.option('--type', 'fault_type', required=True, type=click.Choice(['loss', 'delay', 'down', 'reset'], case_sensitive=False))
 @click.option('--value', required=False, help='Value (e.g., 30% or 100ms)')
 def inject(target, fault_type, value):
     """Inject a fault into a target interface"""
