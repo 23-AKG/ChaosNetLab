@@ -1,53 +1,51 @@
 from logger.logger import log_event
-
 import re
 
 def observe_fault(net, target, fault_type):
     try:
         hosts = net.hosts
-        other_hosts = [h for h in hosts if h.name != target]
         target_host = net.get(target)
+        target_ip = target_host.IP()
+        other_hosts = [h for h in hosts if h.name != target]
 
         for src in other_hosts:
-            cmd = f"ping -c 5 {target_host.IP()}"
+            cmd = f"ping -c 5 {target_ip}"
             output = src.cmd(cmd)
 
-            # Try to extract stats from ping
+            # Regex parsing
             loss_match = re.search(r'(\d+)% packet loss', output)
-            rtt_match = re.search(r'rtt min/avg/max/mdev = ([\d\.]+)/([\d\.]+)/', output)
+            rtt_match = re.search(r'rtt min/avg/max/mdev = ([\d\.]+)/([\d\.]+)/([\d\.]+)/([\d\.]+)', output)
 
-            if loss_match:
-                packet_loss = int(loss_match.group(1))
-            else:
-                packet_loss = None
+            packet_loss = int(loss_match.group(1)) if loss_match else None
+            avg_latency = float(rtt_match.group(2)) if rtt_match else None
+            jitter = float(rtt_match.group(4)) if rtt_match else None
 
-            if rtt_match:
-                avg_latency = float(rtt_match.group(2))
-            else:
-                avg_latency = None
-
-            # Impact analysis
+            # Determine impact
             if packet_loss == 100:
                 impact = "critical"
                 status = "no connectivity"
+            elif packet_loss is None:
+                impact = "unknown"
+                status = "unparsable ping output"
             elif packet_loss > 50 or (avg_latency and avg_latency > 200):
                 impact = "degraded"
                 status = "high loss or latency"
-            elif packet_loss is None:
-                impact = "unknown"
-                status = "could not parse ping"
             else:
                 impact = "normal"
                 status = "reachable"
 
-            message = (
-                f"Ping {src.name} → {target}: "
-                f"loss={packet_loss if packet_loss is not None else 'N/A'}%, "
-                f"avg latency={avg_latency if avg_latency is not None else 'N/A'}ms "
-                f"→ impact={impact} ({status})"
-            )
-
-            log_event("observation", message, source="observer")
+            # Log structured observation
+            log_event("observation", {
+                "source": src.name,
+                "destination": target,
+                "target_ip": target_ip,
+                "loss_percent": packet_loss,
+                "avg_latency_ms": avg_latency,
+                "jitter_ms": jitter,
+                "impact": impact,
+                "status": status,
+                "fault_type": fault_type
+            }, source="observer")
 
     except Exception as e:
         log_event("observation", f"Error observing fault on {target}: {str(e)}", source="observer")
