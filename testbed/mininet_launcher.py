@@ -10,12 +10,14 @@ from mininet.link import TCLink
 from mininet.log import setLogLevel
 from mininet.cli import CLI
 from mininet.node import OVSController
+import subprocess
 
 # Adding project root to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
 from logger.logger import start_session, log_event
+from observer.traffic_observer import observe_fault
 
 
 class CustomTopo(Topo):
@@ -86,48 +88,47 @@ def fault_listener(net, server_socket, stop_event):
                 log_event("injection", f"Injected {fault_type} on {target} (iface={iface}, value={value})", source="fault-listener")
                 print(f"[INJECTED] {fault_type} on {target} -> {result.strip()}")
                 client.send(f"✅ Injected {fault_type} on {target}".encode())
+                observe_fault(net, target, fault_type)
             except Exception as e:
                 print(f"[ERROR] {e}")
                 client.send(f"❌ Failed: {str(e)}".encode())
+            
 
 
 def launch_topology(yaml_file):
     with open(yaml_file, 'r') as f:
         topo_config = yaml.safe_load(f)
-
     topology_summary = {
         "hosts": [host['id'] for host in topo_config.get('hosts', [])],
         "switches": [sw['id'] for sw in topo_config.get('switches', [])],
         "links": len(topo_config.get('links', []))
     }
-
     start_session(yaml_file, topology_summary)
 
     topo = CustomTopo(topo_config)
-    net = Mininet(topo=topo, link=TCLink, controller=OVSController)
-    net.addController('c0')
+    # Build Mininet with OVSController
+    from mininet.node import OVSController  # Required for Open vSwitch
+    net = Mininet(topo=topo, link=TCLink, controller=OVSController)  # Use OVSController
+    net.start()  # Start the network
 
-    net.start()
-    log_event("system", "Mininet network started", source="testbed")
-    print("[*] Network started. Running CLI...")
 
-    # Prepare socket and thread
+
+    # Setup fault listener infrastructure
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind(('127.0.0.1', 9999))
     stop_event = threading.Event()
-    listener_thread = threading.Thread(target=fault_listener, args=(net, server_socket, stop_event), daemon=True)
-    listener_thread.start()
+    threading.Thread(target=fault_listener, args=(net, server_socket, stop_event), daemon=True).start()
 
-    try:
-        CLI(net)
-    finally:
-        log_event("system", "Mininet network stopped", source="testbed")
-        print("[*] Cleaning up...")
-        stop_event.set()
-        server_socket.close()
-        listener_thread.join(timeout=2)
-        net.stop()
+    print("[*] Network started. Running CLI...")
+    log_event("system", "Mininet network started", source="testbed")
+    CLI(net)
+
+    # Clean shutdown
+    stop_event.set()
+    server_socket.close()
+    net.stop()
+    log_event("system", "Mininet network stopped", source="testbed")
+    subprocess.run(["mn", "-c"])  # force cleanup
 
 
 if __name__ == '__main__':
