@@ -4,7 +4,7 @@ import click
 
 @click.command()
 @click.option('--target', required=True, help='Mininet host (e.g., h1)')
-@click.option('--type', 'fault_type', required=True, type=click.Choice(['loss', 'delay', 'down'], case_sensitive=False))
+@click.option('--type', 'fault_type', required=True, type=click.Choice(['loss', 'delay', 'down', 'reset', 'linkdown', 'linkup'], case_sensitive=False))
 @click.option('--value', required=False, help='e.g., 30% for loss, 100ms for delay')
 def inject_fault(target, fault_type, value):
     data = {

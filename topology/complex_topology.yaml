@@ -1,0 +1,40 @@
+hosts:
+  - id: h1
+    ip: 10.0.0.1
+  - id: h2
+    ip: 10.0.0.2
+  - id: h3
+    ip: 10.0.0.3
+  - id: h4
+    ip: 10.0.0.4
+
+switches:
+  - id: s1
+  - id: s2
+  - id: s3
+
+links:
+  - endpoints: [h1, s1]
+    delay: 10ms
+    loss: 1%
+  - endpoints: [h2, s1]
+    delay: 5ms
+    loss: 0%
+  - endpoints: [h2, s2]
+    delay: 5ms
+    loss: 0%
+  - endpoints: [s1, s2]
+    delay: 2ms
+    loss: 0.1%
+  - endpoints: [s2, s3]
+    delay: 3ms
+    loss: 0%
+  - endpoints: [s3, h3]
+    delay: 15ms
+    loss: 0%
+  - endpoints: [s3, h4]
+    delay: 10ms
+    loss: 0%
+  - endpoints: [h1, h4]
+    delay: 20ms
+    loss: 5%

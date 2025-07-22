@@ -25,26 +25,38 @@ class CustomTopo(Topo):
         switches = {}
         hosts = {}
 
+        # Add switches if any
         for sw in topo_config.get('switches', []):
             sw_id = sw['id']
             switches[sw_id] = self.addSwitch(sw_id)
             log_event("topology", f"Switch added: {sw_id}", source="topo-builder")
 
+        # Add hosts
         for host in topo_config.get('hosts', []):
             host_id = host['id']
             hosts[host_id] = self.addHost(host_id, ip=host['ip'])
             log_event("topology", f"Host added: {host_id} with IP {host['ip']}", source="topo-builder")
 
+        # Add links
         for link in topo_config.get('links', []):
-            src, dst = link['endpoints']
+            src = link['endpoints'][0]
+            dst = link['endpoints'][1]
             delay = link.get('delay', '0ms')
-            loss = link.get('loss', '0')
+            loss = link.get('loss', '0%')
+            bw = link.get('bw', None)  # Optional bandwidth field
+
             params = {
                 'delay': delay,
                 'loss': float(loss.replace('%', ''))
             }
-            self.addLink(src, dst, cls=TCLink, **params)
-            log_event("topology", f"Link added: {src} <-> {dst} | delay={delay}, loss={loss}", source="topo-builder")
+            if bw:
+                params['bw'] = int(bw)
+
+            try:
+                self.addLink(src, dst, cls=TCLink, **params)
+                log_event("topology", f"Link added: {src} <-> {dst} | delay={delay}, loss={loss}, bw={bw}", source="topo-builder")
+            except Exception as e:
+                log_event("topology", f"Failed to add link {src} <-> {dst}: {str(e)}", source="topo-builder")
 
 
 def fault_listener(net, server_socket, stop_event):
@@ -67,8 +79,25 @@ def fault_listener(net, server_socket, stop_event):
                 target = cmd.get("target")
                 fault_type = cmd.get("type")
                 value = cmd.get("value", "")
+
+                # Handle link-level faults FIRST
+                if fault_type in ["linkdown", "linkup"]:
+                    try:
+                        node1, node2 = target.split('-')
+                        action = "down" if fault_type == "linkdown" else "up"
+                        net.configLinkStatus(node1.strip(), node2.strip(), action)
+                        log_event("injection", f"Link {node1} <-> {node2} set {action.upper()}", source="fault-listener")
+                        print(f"[INJECTED] Link {node1} <-> {node2} set {action.upper()}")
+                        client.send(f"✅ Link {node1}-{node2} set {action}".encode())
+                    except Exception as e:
+                        log_event("injection", f"Failed to set link {target} {action}: {str(e)}", source="fault-listener")
+                        client.send(f"❌ Failed to update link {target}: {str(e)}".encode())
+                    return  # Exit early after link fault is handled
+
+                # Proceed with host-based faults
                 iface = f"{target}-eth0"
                 host_obj = net.get(target)
+
 
                 if fault_type == "loss":
                     result = host_obj.cmd(f"tc qdisc add dev {iface} root netem loss {value}")
@@ -83,6 +112,23 @@ def fault_listener(net, server_socket, stop_event):
                 elif fault_type == "reset":
                     result = host_obj.cmd(f"tc qdisc del dev {iface} root")
                     result += host_obj.cmd(f"ifconfig {iface} up")
+                    # Bring links back up (only once for reset)
+                    for link in net.links:
+                        n1 = link.intf1.node.name
+                        n2 = link.intf2.node.name
+                        net.configLinkStatus(n1, n2, "up")
+
+                elif fault_type == "linkdown" or fault_type == "linkup":
+                    try:
+                        node1, node2 = target.split('-')
+                        action = "down" if fault_type == "linkdown" else "up"
+                        net.configLinkStatus(node1.strip(), node2.strip(), action)
+                        log_event("injection", f"Link {node1} <-> {node2} set {action.upper()}", source="fault-listener")
+                        print(f"[INJECTED] Link {node1} <-> {node2} set {action.upper()}")
+                        client.send(f"✅ Link {node1}-{node2} set {action}".encode())
+                    except Exception as e:
+                        log_event("injection", f"Failed to set link {target} {action}: {str(e)}", source="fault-listener")
+                        client.send(f"❌ Failed to update link {target}: {str(e)}".encode())
                 else:
                     result = f"Unsupported fault type: {fault_type}"
 
@@ -111,8 +157,6 @@ def launch_topology(yaml_file):
     from mininet.node import OVSController  # Required for Open vSwitch
     net = Mininet(topo=topo, link=TCLink, controller=OVSController)  # Use OVSController
     net.start()  # Start the network
-
-
 
     # Setup fault listener infrastructure
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
