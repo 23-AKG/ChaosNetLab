@@ -1,5 +1,7 @@
 from logger.logger import log_event
 import re
+import time
+import subprocess
 
 def observe_fault(net, target, fault_type):
     try:
@@ -9,18 +11,45 @@ def observe_fault(net, target, fault_type):
         other_hosts = [h for h in hosts if h.name != target]
 
         for src in other_hosts:
+            # Step 1: Ping
             cmd = f"ping -c 5 {target_ip}"
             output = src.cmd(cmd)
 
-            # Regex parsing
+            # Extract loss, latency, jitter
             loss_match = re.search(r'(\d+)% packet loss', output)
             rtt_match = re.search(r'rtt min/avg/max/mdev = ([\d\.]+)/([\d\.]+)/([\d\.]+)/([\d\.]+)', output)
+            tx_match = re.search(r'(\d+) packets transmitted', output)
+            rx_match = re.search(r'(\d+) received', output)
 
             packet_loss = int(loss_match.group(1)) if loss_match else None
             avg_latency = float(rtt_match.group(2)) if rtt_match else None
             jitter = float(rtt_match.group(4)) if rtt_match else None
 
-            # Determine impact
+            # Step 2: PDR
+            if tx_match and rx_match:
+                tx = int(tx_match.group(1))
+                rx = int(rx_match.group(1))
+                pdr = round((rx / tx) * 100, 2) if tx > 0 else None
+            else:
+                pdr = None
+
+            # Step 3: Throughput using iperf
+            throughput = None
+            try:
+                # Start iperf server on target
+                target_proc = target_host.popen("iperf -s -u -p 5001", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1)
+
+                # Run client from src to target
+                iperf_output = src.cmd(f"iperf -u -c {target_ip} -p 5001 -t 5")
+                match = re.search(r'([\d\.]+)\s+Mbits/sec', iperf_output)
+                if match:
+                    throughput = float(match.group(1))
+                target_proc.terminate()
+            except Exception as e:
+                pass  # skip if iperf fails
+
+            # Step 4: Impact analysis
             if packet_loss == 100:
                 impact = "critical"
                 status = "no connectivity"
@@ -34,7 +63,7 @@ def observe_fault(net, target, fault_type):
                 impact = "normal"
                 status = "reachable"
 
-            # Log structured observation
+            # Log everything
             log_event("observation", {
                 "source": src.name,
                 "destination": target,
@@ -42,6 +71,8 @@ def observe_fault(net, target, fault_type):
                 "loss_percent": packet_loss,
                 "avg_latency_ms": avg_latency,
                 "jitter_ms": jitter,
+                "pdr": pdr,
+                "throughput_mbps": throughput,
                 "impact": impact,
                 "status": status,
                 "fault_type": fault_type
@@ -49,30 +80,3 @@ def observe_fault(net, target, fault_type):
 
     except Exception as e:
         log_event("observation", f"Error observing fault on {target}: {str(e)}", source="observer")
-
-
-def _ping_all_to_target(net, target, fault_type):
-    for host in net.hosts:
-        if host.name != target:
-            result = host.cmd(f"ping -c 4 {target}")
-            summary = _parse_ping_result(result)
-            log_event("observation", f"Ping {host.name} → {target}: {summary}", source="observer")
-
-def _check_connectivity_loss(net, target):
-    for host in net.hosts:
-        if host.name != target:
-            result = host.cmd(f"ping -c 2 {target}")
-            if "100% packet loss" in result:
-                status = "Target unreachable as expected"
-            else:
-                status = "Target still reachable — unexpected"
-            log_event("observation", f"Down Check {host.name} → {target}: {status}", source="observer")
-
-def _parse_ping_result(output):
-    lines = output.splitlines()
-    for line in lines:
-        if "rtt min/avg/max" in line:
-            return line.split('=')[1].strip()
-        if "packet loss" in line:
-            return line.strip()
-    return "No useful ping output"

@@ -82,6 +82,7 @@ def fault_listener(net, server_socket, stop_event):
                     result = host_obj.cmd(f"ifconfig {iface} down")
                 elif fault_type == "reset":
                     result = host_obj.cmd(f"tc qdisc del dev {iface} root")
+                    result += host_obj.cmd(f"ifconfig {iface} up")
                 else:
                     result = f"Unsupported fault type: {fault_type}"
 

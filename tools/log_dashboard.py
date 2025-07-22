@@ -30,9 +30,14 @@ def summarize_logs(events):
             dst = msg.get("destination")
             loss = msg.get("loss_percent", 'N/A')
             latency = msg.get("avg_latency_ms", 'N/A')
+            jitter = msg.get("jitter_ms", 'N/A')
+            pdr = msg.get("pdr", 'N/A')
+            throughput = msg.get("throughput_mbps", 'N/A')
             impact = msg.get("impact", 'N/A')
             status = msg.get("status", '')
-            print(f"{src} → {dst} | loss={loss}%, avg_latency={latency}ms → impact={impact} ({status})")
+
+            print(f"{src} → {dst} | loss={loss}%, latency={latency}ms, jitter={jitter}ms, PDR={pdr}%, "
+                  f"throughput={throughput} Mbps → impact={impact} ({status})")
             impact_counter[impact] += 1
 
     print("\n─────────────── Stats ───────────────")
