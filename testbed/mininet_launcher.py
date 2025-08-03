@@ -11,7 +11,7 @@ from mininet.log import setLogLevel
 from mininet.cli import CLI
 from mininet.node import OVSController
 import subprocess
-
+import ipaddress
 # Adding project root to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
@@ -24,8 +24,10 @@ class CustomTopo(Topo):
     def build(self, topo_config):
         switches = {}
         hosts = {}
+        routers = {}
+        firewalls = {}
 
-        # Add switches if any
+        # Add switches
         for sw in topo_config.get('switches', []):
             sw_id = sw['id']
             switches[sw_id] = self.addSwitch(sw_id)
@@ -37,18 +39,25 @@ class CustomTopo(Topo):
             hosts[host_id] = self.addHost(host_id, ip=host['ip'])
             log_event("topology", f"Host added: {host_id} with IP {host['ip']}", source="topo-builder")
 
+        # Add routers (Linux hosts with forwarding + static routes)
+        for router in topo_config.get('routers', []):
+            r_id = router['id']
+            routers[r_id] = self.addHost(r_id)
+            log_event("topology", f"Router added: {r_id}", source="topo-builder")
+
+        # Add firewalls (Linux hosts with iptables)
+        for fw in topo_config.get('firewalls', []):
+            fw_id = fw['id']
+            firewalls[fw_id] = self.addHost(fw_id)
+            log_event("topology", f"Firewall added: {fw_id}", source="topo-builder")
         # Add links
         for link in topo_config.get('links', []):
-            src = link['endpoints'][0]
-            dst = link['endpoints'][1]
+            src, dst = link['endpoints']
             delay = link.get('delay', '0ms')
             loss = link.get('loss', '0%')
-            bw = link.get('bw', None)  # Optional bandwidth field
+            bw = link.get('bw', None)
 
-            params = {
-                'delay': delay,
-                'loss': float(loss.replace('%', ''))
-            }
+            params = {'delay': delay, 'loss': float(loss.replace('%', ''))}
             if bw:
                 params['bw'] = int(bw)
 
@@ -150,6 +159,85 @@ def launch_topology(yaml_file):
         "switches": [sw['id'] for sw in topo_config.get('switches', [])],
         "links": len(topo_config.get('links', []))
     }
+
+    
+
+    def validate_topology(topo_config):
+        errors = []
+        device_ids = set()
+
+        # Collect all devices
+        for h in topo_config.get('hosts', []):
+            device_ids.add(h['id'])
+        for s in topo_config.get('switches', []):
+            device_ids.add(s['id'])
+        for r in topo_config.get('routers', []):
+            device_ids.add(r['id'])
+        for f in topo_config.get('firewalls', []):
+            device_ids.add(f['id'])
+
+        # Validate Routers
+        for r in topo_config.get('routers', []):
+            if not r.get('interfaces'):
+                msg = f"Router {r['id']} has no interfaces defined."
+                errors.append(msg)
+                log_event("validation", msg, source="validator")
+            for iface in r.get('interfaces', []):
+                if not any(r['id'] in link['endpoints'] for link in topo_config.get('links', [])):
+                    msg = f"Interface {iface['name']} of Router {r['id']} is not connected in links."
+                    errors.append(msg)
+                    log_event("validation", msg, source="validator")
+            for route in r.get('routes', []):
+                try:
+                    ipaddress.ip_network(route['dest'])
+                    ipaddress.ip_address(route['via'])
+                except ValueError:
+                    msg = f"Router {r['id']} has invalid route format: {route}"
+                    errors.append(msg)
+                    log_event("validation", msg, source="validator")
+
+        # Validate Firewalls
+        for f in topo_config.get('firewalls', []):
+            if len(f.get('interfaces', [])) < 2:
+                msg = f"Firewall {f['id']} must have at least 2 interfaces."
+                errors.append(msg)
+                log_event("validation", msg, source="validator")
+            for iface in f.get('interfaces', []):
+                if not any(f['id'] in link['endpoints'] for link in topo_config.get('links', [])):
+                    msg = f"Interface {iface['name']} of Firewall {f['id']} is not connected in links."
+                    errors.append(msg)
+                    log_event("validation", msg, source="validator")
+            for rule in f.get('rules', []):
+                try:
+                    ipaddress.ip_address(rule['src'])
+                except ValueError:
+                    msg = f"Firewall {f['id']} has invalid rule source: {rule['src']}"
+                    errors.append(msg)
+                    log_event("validation", msg, source="validator")
+
+        # Validate Links
+        for link in topo_config.get('links', []):
+            for endpoint in link['endpoints']:
+                if endpoint not in device_ids:
+                    msg = f"Link endpoint {endpoint} not found in devices."
+                    errors.append(msg)
+                    log_event("validation", msg, source="validator")
+        link_pairs = [tuple(sorted(link['endpoints'])) for link in topo_config.get('links', [])]
+        if len(link_pairs) != len(set(link_pairs)):
+            msg = "Duplicate links found."
+            errors.append(msg)
+            log_event("validation", msg, source="validator")
+
+        if errors:
+            log_event("validation", "❌ Topology validation failed.", source="validator")
+            print("\n❌ Topology validation failed with errors:")
+            for e in errors:
+                print(f"  - {e}")
+            sys.exit(1)
+        else:
+            log_event("validation", "✅ Topology validation passed.", source="validator")
+            print("✅ Topology validation passed.")
+
     start_session(yaml_file, topology_summary)
 
     topo = CustomTopo(topo_config)
@@ -157,7 +245,137 @@ def launch_topology(yaml_file):
     from mininet.node import OVSController  # Required for Open vSwitch
     net = Mininet(topo=topo, link=TCLink, controller=OVSController)  # Use OVSController
     net.start()  # Start the network
+    # === Auto configure universal IP forwarding & routing ===
+    log_event("system", "Starting universal auto-config for routers, firewalls, and hosts", source="auto-config")
 
+    # Routers - enable forwarding, set IPs, static routes
+    for router in topo_config.get('routers', []):
+        r_node = net.get(router['id'])
+        r_node.cmd("sysctl -w net.ipv4.ip_forward=1")
+        log_event("system", f"IP forwarding enabled on {router['id']}", source="auto-config")
+
+        for iface in router.get('interfaces', []):
+            r_node.cmd(f"ifconfig {iface['name']} {iface['ip']} up")
+            log_event("system", f"{router['id']} interface {iface['name']} set to {iface['ip']}", source="auto-config")
+
+        for route in router.get('routes', []):
+            r_node.cmd(f"ip route add {route['dest']} via {route['via']}")
+            log_event("system", f"Route added on {router['id']}: {route['dest']} via {route['via']}", source="auto-config")
+
+    # Firewalls - enable forwarding, set IPs, rules
+    for fw in topo_config.get('firewalls', []):
+        fw_node = net.get(fw['id'])
+        fw_node.cmd("sysctl -w net.ipv4.ip_forward=1")
+        log_event("system", f"IP forwarding enabled on {fw['id']}", source="auto-config")
+
+        for iface in fw.get('interfaces', []):
+            fw_node.cmd(f"ifconfig {iface['name']} {iface['ip']} up")
+            log_event("system", f"{fw['id']} interface {iface['name']} set to {iface['ip']}", source="auto-config")
+
+        for rule in fw.get('rules', []):
+            fw_node.cmd(f"iptables -A FORWARD -s {rule['src']} -j {rule['action']}")
+            log_event("system", f"Firewall {fw['id']} rule: {rule['action']} from {rule['src']}", source="auto-config")
+
+    # Hosts - set default route + return routes for resilience
+    for host in topo_config.get('hosts', []):
+        h_node = net.get(host['id'])
+        host_ip_parts = host['ip'].split('/')[0].split('.')
+
+        gateway_ip = None
+        for link in topo_config.get('links', []):
+            if host['id'] in link['endpoints']:
+                peer = [p for p in link['endpoints'] if p != host['id']][0]
+                for router in topo_config.get('routers', []):
+                    if router['id'] == peer:
+                        for iface in router.get('interfaces', []):
+                            if iface['ip'].split('.')[0:3] == host_ip_parts[0:3]:
+                                gateway_ip = iface['ip'].split('/')[0]
+                for fw in topo_config.get('firewalls', []):
+                    if fw['id'] == peer:
+                        for iface in fw.get('interfaces', []):
+                            if iface['ip'].split('.')[0:3] == host_ip_parts[0:3]:
+                                gateway_ip = iface['ip'].split('/')[0]
+
+        if gateway_ip:
+            h_node.cmd(f"ip route add default via {gateway_ip}")
+            log_event("system", f"Default route set on {host['id']} via {gateway_ip}", source="auto-config")
+        else:
+            log_event("system", f"No gateway found for {host['id']}", source="auto-config")
+
+        # Add return route (fail-proof in case default route doesn't match)
+        for peer in topo_config.get('hosts', []):
+            if peer['id'] != host['id']:
+                subnet = '.'.join(peer['ip'].split('/')[0].split('.')[:3]) + '.0/24'
+                h_node.cmd(f"ip route add {subnet} dev {host['id']}-eth0")
+                log_event("system", f"Return route added on {host['id']} to {subnet}", source="auto-config")
+
+
+    # Auto configure routers
+    for router in topo_config.get('routers', []):
+        r_node = net.get(router['id'])
+        r_node.cmd("sysctl -w net.ipv4.ip_forward=1")
+        log_event("system", f"IP forwarding enabled on {router['id']}", source="auto-config")
+
+        # Set interface IPs
+        for iface in router.get('interfaces', []):
+            r_node.cmd(f"ifconfig {iface['name']} {iface['ip']} up")
+            log_event("system", f"{router['id']} interface {iface['name']} set to {iface['ip']}", source="auto-config")
+
+        # Add static routes
+        for route in router.get('routes', []):
+            r_node.cmd(f"ip route add {route['dest']} via {route['via']}")
+            log_event("system", f"Route added on {router['id']}: {route['dest']} via {route['via']}", source="auto-config")
+
+
+    # Auto configure firewalls
+    for fw in topo_config.get('firewalls', []):
+        fw_node = net.get(fw['id'])
+        fw_node.cmd("sysctl -w net.ipv4.ip_forward=1")
+        log_event("system", f"IP forwarding enabled on {fw['id']}", source="auto-config")
+
+        # Set firewall interface IPs
+        for iface in fw.get('interfaces', []):
+            fw_node.cmd(f"ifconfig {iface['name']} {iface['ip']} up")
+            log_event("system", f"{fw['id']} interface {iface['name']} set to {iface['ip']}", source="auto-config")
+
+        # Apply firewall rules
+        for rule in fw.get('rules', []):
+            action = rule['action']
+            src_ip = rule.get('src')
+            fw_node.cmd(f"iptables -A FORWARD -s {src_ip} -j {action}")
+            log_event("system", f"Firewall {fw['id']} rule: {action} from {src_ip}", source="auto-config")
+
+    # # === Auto configure default routes for hosts ===
+    # for host in topo_config.get('hosts', []):
+    #     h_node = net.get(host['id'])
+
+    #     # Identify the gateway (connected router or firewall)
+    #     gateway_ip = None
+    #     for link in topo_config.get('links', []):
+    #         if host['id'] in link['endpoints']:
+    #             other_dev = [dev for dev in link['endpoints'] if dev != host['id']][0]
+
+    #             # Check if the other device is a router or firewall
+    #             for router in topo_config.get('routers', []):
+    #                 if router['id'] == other_dev:
+    #                     # Find IP in same subnet
+    #                     for iface in router.get('interfaces', []):
+    #                         if iface['ip'].split('/')[0].startswith(host['ip'].split('.')[0]):
+    #                             gateway_ip = iface['ip'].split('/')[0]
+    #             for fw in topo_config.get('firewalls', []):
+    #                 if fw['id'] == other_dev:
+    #                     for iface in fw.get('interfaces', []):
+    #                         if iface['ip'].split('/')[0].startswith(host['ip'].split('.')[0]):
+    #                             gateway_ip = iface['ip'].split('/')[0]
+
+    #     # Apply default route if gateway found
+    #     if gateway_ip:
+    #         h_node.cmd(f"ip route add default via {gateway_ip}")
+    #         log_event("system", f"Default route set on {host['id']} via {gateway_ip}", source="auto-config")
+    #     else:
+    #         log_event("system", f"No gateway found for host {host['id']}", source="auto-config")
+
+    
     # Setup fault listener infrastructure
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind(('127.0.0.1', 9999))

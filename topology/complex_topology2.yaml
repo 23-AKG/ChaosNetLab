@@ -1,0 +1,66 @@
+hosts:
+  - id: h1
+    ip: 10.0.0.1/24
+  - id: h2
+    ip: 10.0.0.2/24
+  - id: h3
+    ip: 10.0.1.3/24
+  - id: h4
+    ip: 10.0.1.4/24
+
+routers:
+  - id: r1
+    interfaces:
+      - name: r1-eth0
+        ip: 10.0.0.254/24
+      - name: r1-eth1
+        ip: 192.168.1.1/24
+    routes:
+      - dest: 10.0.1.0/24
+        via: 192.168.1.2
+
+  - id: r2
+    interfaces:
+      - name: r2-eth0
+        ip: 192.168.1.2/24
+      - name: r2-eth1
+        ip: 10.0.1.254/24
+    routes:
+      - dest: 10.0.0.0/24
+        via: 192.168.1.1
+
+firewalls:
+  - id: fw1
+    interfaces:
+      - name: fw1-eth0
+        ip: 10.0.1.253/24
+      - name: fw1-eth1
+        ip: 172.16.0.1/24
+    rules:
+      - action: DROP
+        src: 10.0.0.2
+      - action: ACCEPT
+        src: 10.0.0.3
+
+switches:
+  - id: s1
+  - id: s2
+  - id: s3
+
+links:
+  # Hosts
+  - endpoints: [h1, s1]
+  - endpoints: [h2, s1]
+  - endpoints: [h3, s3]
+  - endpoints: [h4, s3]
+
+  # Switch interconnect
+  - endpoints: [s1, s2]
+  - endpoints: [s2, s3]
+
+  # Routers and firewall placement
+  - endpoints: [r1, s1]
+  - endpoints: [r1, s2]
+  - endpoints: [r2, s2]
+  - endpoints: [r2, s3]
+  - endpoints: [fw1, s3]
